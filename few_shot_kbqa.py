@@ -5,6 +5,7 @@ from sparql_exe import execute_query, get_types, get_2hop_relations, lisp_to_spa
 from utils import process_file, process_file_node, process_file_rela, process_file_test
 from rank_bm25 import BM25Okapi
 from time import sleep
+import time
 import re
 import logging
 from collections import Counter
@@ -14,13 +15,15 @@ from pyserini.search.hybrid import HybridSearcher
 from pyserini.search.faiss import AutoQueryEncoder
 import random
 import itertools
+from tqdm import tqdm
 
 
-logging.getLogger().setLevel(logging.INFO)
 logging.basicConfig(format='%(asctime)s %(levelname)-8s %(message)s',
                     level=logging.INFO,
-                    datefmt='%Y-%m-%d %H:%M:%S')
+                    datefmt='%Y-%m-%d %H:%M:%S',
+                    filename='result_{time}.log'.format(time=time.strftime("%Y%m%d-%H%M%S")))
 logger = logging.getLogger("time recoder")
+logger.setLevel(logging.INFO)
 
 def select_shot_prompt_train(train_data_in, shot_number):
     random.shuffle(train_data_in)
@@ -75,24 +78,22 @@ def type_generator(question, prompt_type, api_key, LLM_engine):
     sleep(1)
     prompt = prompt_type
     prompt = prompt + " Question: " + question + "Type of the question: "
-    got_result = False
-    while got_result != True:
-        try:
-            openai.api_key = api_key
-            answer_modi = openai.Completion.create(
-                engine=LLM_engine,
-                prompt=prompt,
-                temperature=0,
+    # logger.info("type generator prompt: {}".format(prompt))
+    
+    openai.api_key = api_key
+    openai.base_url = "http://localhost:8000/v1/"
+    answer_modi =  openai.completions.create(
+        model='vicuna-7b-v1.5',
+        prompt=prompt,
+        temperature=0,
                 max_tokens=256,
                 top_p=1,
                 frequency_penalty=0,
                 presence_penalty=0,
                 stop=["Question: "]
             )
-            got_result = True
-        except:
-            sleep(3)
-    gene_exp = answer_modi["choices"][0]["text"].strip()
+    
+    gene_exp = answer_modi.choices[0].text.strip()
     return gene_exp
 
 
@@ -113,25 +114,20 @@ def ep_generator(question, selected_examples, temp, que_to_s_dict_train, questio
             continue
         prompt = prompt + "Question: " + que + "\n" + "Logical Form: " + sub_mid_to_fn(que, que_to_s_dict_train[que], question_to_mid_dict) + "\n"
     prompt = prompt + "Question: " + question + "\n" + "Logical Form: "
-    got_result = False
-    while got_result != True:
-        try:
-            openai.api_key = api_key
-            answer_modi = openai.Completion.create(
-                engine=LLM_engine,
-                prompt=prompt,
-                temperature=temp,
+    # logger.info("prompt: {}".format(prompt))
+    openai.api_key = api_key
+    openai.base_url = "http://localhost:8000/v1/"
+    answer_modi =  openai.completions.create(
+        model='vicuna-7b-v1.5',
+        prompt=prompt,
+        temperature=0,
                 max_tokens=256,
                 top_p=1,
                 frequency_penalty=0,
                 presence_penalty=0,
-                stop=["Question: "],
-                n=7
+                stop=["Question: "]
             )
-            got_result = True
-        except:
-            sleep(3)
-    gene_exp = [exp["text"].strip() for exp in answer_modi["choices"]]
+    gene_exp = [exp.text.strip() for exp in answer_modi.choices]
     return gene_exp
 
 
@@ -209,7 +205,13 @@ def from_fn_to_id_set(fn_list, question, name_to_id_dict, bm25_all_fns, all_fns)
         if fn_org.lower() not in name_to_id_dict:
             logger.info("fn_org: {}".format(fn_org.lower()))
             tokenized_query = fn_org.lower().split()
-            fn = bm25_all_fns.get_top_n(tokenized_query, all_fns, n=1)[0]
+            # fn = bm25_all_fns.get_top_n(tokenized_query, all_fns, n=1)[0]
+            '''
+            chunk_size = 100
+            '''
+            chunk_size = 100
+            fn = get_top_n_chunks(all_fns, chunk_size, tokenized_query, 1)[0][0]
+
             logger.info("sub fn: {}".format(fn))
         else:
             fn = fn_org
@@ -515,7 +517,25 @@ def all_combiner_evaluation(data_batch, selected_quest_compare, selected_quest_c
             logger.info(" ")
             logger.info("================================================================")
 
+def chunkify(lst, n,split_list=True):
+    for i in range(0, len(lst), n):
+        res = lst[i:i + n]
+        if split_list:
+            res = [x.split() for x in res]
+        yield res
 
+def process_chunks(lst,chunk_size, query, n,split_list=True):
+    res = []
+    for chunk in chunkify(lst, chunk_size,split_list):
+        bm25 = BM25Okapi(chunk)
+        scores = bm25.get_scores(query)
+        res.append((chunk, scores))
+    # sort by the max score
+    res = sorted(res, key=lambda x: max(x[1]), reverse=True)
+    return res
+def get_top_n_chunks(lst,chunk_size, query, n,split_list=True):
+    res = process_chunks(chunks, query)
+    return [x[0] for x in res[:n]]
 
 
 def parse_args():
@@ -578,6 +598,7 @@ def main():
                 prompt_type += "Comparison\n"
     else:
         prompt_type = ''
+    # logger.info("prompt_type: {}".format(prompt_type))
     with open(args.fb_roles_path) as f:
         lines = f.readlines()
     relationships = []
@@ -589,11 +610,12 @@ def main():
         entities_set.append(info[0])
         entities_set.append(info[2])
         relationship_to_enti[info[1]] = [info[0], info[2]]
-
+    logger.info("#relationships: {}".format(len(relationships)))
     with open(args.surface_map_path) as f:
         lines = f.readlines()
     name_to_id_dict = {}
-    for line in lines:
+    logger.info("len(lines): {}".format(len(lines)))
+    for line in tqdm(lines,total=len(lines)):
         info = line.split("\t")
         name = info[0]
         score = float(info[1])
@@ -604,8 +626,12 @@ def main():
             name_to_id_dict[name] = {}
             name_to_id_dict[name][mid] = score
     all_fns = list(name_to_id_dict.keys())
-    tokenized_all_fns = [fn.split() for fn in all_fns]
-    bm25_all_fns = BM25Okapi(tokenized_all_fns)
+    logger.info("len(all_fns): {}".format(len(all_fns)))
+    # tokenized_all_fns = [fn.split() for fn in all_fns] # it willl crash here
+    # logger.info("len(tokenized_all_fns): {}".format(len(tokenized_all_fns)))
+    # bm25_all_fns = BM25Okapi(tokenized_all_fns)
+    bm25_all_fns = None
+    logger.info('Successfully loaded all the data')
     all_combiner_evaluation(dev_data, selected_quest_compose, selected_quest_compare, selected_quest, prompt_type,
                             hsearcher, rela_corpus, relationships, args.temperature, que_to_s_dict_train,
                             question_to_mid_dict, args.api_key, args.engine, name_to_id_dict, bm25_all_fns,
