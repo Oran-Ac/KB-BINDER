@@ -56,9 +56,11 @@ flags.DEFINE_bool('save_model',True,'save model')
 flags.DEFINE_bool('with_tracking',True,'with tracking')
 # feature
 flags.DEFINE_bool('add_feature',False,'only sentence2sentence')
-flags.DEFINE_string('feature_type',None,'feature type') #e.g., schema
-
-
+flags.DEFINE_string('feature_type',None,'feature type') #e.g., [schema,replaced] #?it's shouldn't be String, it should be List  
+# s expression
+flags.DEFINE_bool('use_s_expression',False,'use s expression')
+# few-shot
+flags.DEFINE_integer('shot',0,'shot')
 def set_seed(seed):
     # set seed
     torch.manual_seed(seed)
@@ -108,7 +110,10 @@ def main(argv):
     tokenizer = AutoTokenizer.from_pretrained(FLAGS.model_name)
     evaluate = SparqlEvaluator()
     if FLAGS.add_feature:
-        raise
+        if FLAGS.feature_type == 'replaced':
+            model = None
+        else:
+            raise
     else:
         model = None
     
@@ -119,12 +124,14 @@ def main(argv):
                                                 max_length=FLAGS.max_length,
                                                 status='train',
                                                 add_feature=FLAGS.add_feature,
-                                                feature_type=FLAGS.feature_type)
+                                                feature_type=FLAGS.feature_type,
+                                                s_expression=FLAGS.use_s_expression)
     test_dataset = config.dataset_dict[FLAGS.dataset](tokenizer,
                                                max_length=FLAGS.max_length,
                                                status='test',
                                                add_feature=FLAGS.add_feature,
-                                                feature_type=FLAGS.feature_type)
+                                                feature_type=FLAGS.feature_type,
+                                                s_expression=FLAGS.use_s_expression)
     train_dataloader = torch.utils.data.DataLoader(
                                                 train_dataset,
                                                 batch_size=FLAGS.train_batch_size,
@@ -257,8 +264,8 @@ def main(argv):
         if not FLAGS.fix_backbone:
             backbone.eval()
         total_loss = []
-        total_em = []
         all_preds = []
+        all_labels = []
         evaluate.reset_metric()
         logger.info(f'***** evaluation *****')
         for step, batch in enumerate(test_dataloader):
@@ -267,41 +274,44 @@ def main(argv):
                     input_ids=batch['input_ids'],
                     attention_mask=batch['attention_mask'],
                     max_new_tokens=FLAGS.max_length,
-                    min_new_tokens=FLAGS.max_length,
-                    num_beams=1,
                     return_dict_in_generate=True,
                     output_logits=True,
                 )
             logist = torch.stack(outputs.logits,dim=1)
-            loss = cross_entropy_loss(reduction=FLAGS.reduction)(logist.view(-1,logist.size(-1)),batch['label'].view(-1))
-            total_loss.append((float(loss.detach())))
-            all_preds.extend(outputs.sequences.cpu().numpy().tolist())
+            # output the logist shape and the label shape
+            # logger.info(f'logist shape: {logist.size()}')
+            # logger.info(f'label shape: {batch["label"].size()}')
+            # loss = cross_entropy_loss(reduction=FLAGS.reduction)(logist.view(-1,logist.size(-1)),batch['label'].view(-1))
+            # total_loss.append((float(loss.detach())))
+            preds = outputs.sequences.cpu().numpy().tolist()
             # decode the output
-            output_readable = tokenizer.batch_decode(all_preds,skip_special_tokens=True)
+            output_readable = tokenizer.batch_decode(preds,skip_special_tokens=True)
             # decode the label
             label_readable = tokenizer.batch_decode(batch['label'].cpu().numpy(),skip_special_tokens=True)
             # calculate the metrics
             evaluate.evaluate(output_readable,label_readable)
+            all_preds.extend(output_readable)
+            all_labels.extend(label_readable)
         if accelerator.is_main_process:
-            logger.info(f'test/epoch: {epoch}, test/loss: {np.mean(total_loss)}')
-            reprt = evaluate.report()
-            logger.info(reprt)
+            report = evaluate.report()
+            logger.info(f'test/epoch: {epoch}, "test/em": {report["exact_match"]}')
+            logger.info(report)
         if FLAGS.with_tracking:
             accelerator.log(
                 {
                     "test/epoch": epoch,
-                    "test/loss": np.mean(total_loss),
-                    "test/em": reprt['exact_match'],
+                    # "test/loss": np.mean(total_loss),
+                    "test/em": report['exact_match'],
                 }
             )
         # save the output
         with open(os.path.join(FLAGS.output_log_dir,f'{FLAGS.model_name.replace("/","-")}_{now_time}_output.json'),'a') as f:
             f.write(f'epoch: {epoch}\n')
-            for item in output_readable:
-                f.write(json.dumps(item)+'\n')
+            for output,label in zip(all_preds,all_labels):
+                f.write(json.dumps({'output':output,'label':label})+'\n')
             f.write('\n\n')
-        if reprt['exact_match'] > best_em:
-            best_em = reprt['exact_match']
+        if report['exact_match'] > best_em:
+            best_em = report['exact_match']
             patience_counter = 0
             if accelerator.is_main_process:
                 logger.info(f'best em: {best_em}')
