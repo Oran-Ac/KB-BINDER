@@ -11,3 +11,7 @@ dataset_dict = {
 data_collator_dict = {
     'webqsp_0107': GenerationCollator
 }
+
+dataset_dict_few_shot = {
+    'webqsp_0107': NL2SQLDatasetFewShot,
+}

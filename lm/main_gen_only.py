@@ -59,8 +59,7 @@ flags.DEFINE_bool('add_feature',False,'only sentence2sentence')
 flags.DEFINE_string('feature_type',None,'feature type') #e.g., [schema,replaced] #?it's shouldn't be String, it should be List  
 # s expression
 flags.DEFINE_bool('use_s_expression',False,'use s expression')
-# few-shot
-flags.DEFINE_integer('shot',0,'shot')
+
 def set_seed(seed):
     # set seed
     torch.manual_seed(seed)
